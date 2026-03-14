@@ -46,7 +46,12 @@ class NeuroPointerApp:
         self.message = ""
         self.message_until = 0.0
         self.recenter_until = 0
-        
+        self.testing_mode = False
+        self.testing_stats = {
+            "hand": self._new_test_bucket(),
+            "eye": self._new_test_bucket(),
+        }
+        self.last_test_print = 0.0
 
     def _open_camera(self):
         cap = cv2.VideoCapture(config.CAMERA_INDEX, cv2.CAP_DSHOW)
@@ -65,6 +70,60 @@ class NeuroPointerApp:
         if time.perf_counter() > self.message_until:
             return ""
         return self.message
+
+    @staticmethod
+    def _new_test_bucket() -> dict:
+        return {
+            "samples": 0,
+            "sum_confidence": 0.0,
+            "low_confidence": 0,
+            "diagnostic_hits": 0,
+            "gestures": {},
+        }
+
+    def _record_test_sample(self, mode: str, gesture_label: str, confidence: float, diagnostics: list[str]) -> str:
+        if not self.testing_mode:
+            return ""
+
+        if gesture_label in {"Move", "Nose Move", "Idle", "No Hand", "No Face"}:
+            return ""
+
+        bucket = self.testing_stats[mode]
+        bucket["samples"] += 1
+        bucket["sum_confidence"] += confidence
+        bucket["diagnostic_hits"] += len(diagnostics)
+        if confidence < 0.65:
+            bucket["low_confidence"] += 1
+
+        gesture_bucket = bucket["gestures"].setdefault(
+            gesture_label,
+            {"count": 0, "sum_confidence": 0.0},
+        )
+        gesture_bucket["count"] += 1
+        gesture_bucket["sum_confidence"] += confidence
+
+        summary = (
+            f"test {mode}: n={bucket['samples']} "
+            f"avg={bucket['sum_confidence'] / max(bucket['samples'], 1):.2f} "
+            f"low={bucket['low_confidence']} diag={bucket['diagnostic_hits']}"
+        )
+
+        now = time.perf_counter()
+        if (now - self.last_test_print) >= config.TEST_MODE_PRINT_SECONDS:
+            self.last_test_print = now
+            top_label = max(
+                bucket["gestures"].items(),
+                key=lambda item: item[1]["count"],
+                default=("none", {"count": 0, "sum_confidence": 0.0}),
+            )
+            print(
+                f"[test-mode] mode={mode} samples={bucket['samples']} "
+                f"avg_conf={bucket['sum_confidence'] / max(bucket['samples'], 1):.2f} "
+                f"low_conf={bucket['low_confidence']} "
+                f"top={top_label[0]}:{top_label[1]['count']}"
+            )
+
+        return summary
 
     def _process_hand_mode(self, frame, active_zone=None):
         hands = self.hand_detector.detect(frame)
@@ -88,6 +147,9 @@ class NeuroPointerApp:
 
             if result["left_click"]:
                 self.mouse.left_click()
+            if result["double_click"]:
+                # The first click already happened in the preceding pinch; add the second click only.
+                self.mouse.double_click(second_click_only=True)
             if result["right_click"]:
                 self.mouse.right_click()
             if result["scroll_amount"] != 0:
@@ -107,6 +169,12 @@ class NeuroPointerApp:
                 diagnostics.append("lighting low")
             elif brightness > config.HAND_MAX_BRIGHTNESS:
                 diagnostics.append("lighting harsh")
+            test_summary = self._record_test_sample(
+                "hand",
+                gesture_label,
+                result["gesture_confidence"],
+                diagnostics,
+            )
 
             debug_lines.extend(
                 [
@@ -120,6 +188,7 @@ class NeuroPointerApp:
                     f"fist={result['metrics']['fist_ratio']:.3f} / {thresholds['fist_threshold']:.3f}",
                     f"scale={result['metrics']['hand_scale']:.3f} brightness={brightness:.0f}",
                     f"diag={', '.join(diagnostics) if diagnostics else 'ok'}",
+                    test_summary if test_summary else "",
                 ]
             )
         else:
@@ -142,17 +211,27 @@ class NeuroPointerApp:
         if faces:
             face = faces[0]
             result = self.gaze_tracker.estimate(face)
+            self.last_eye_metrics = {"ear": result["ear"]}
+            self.last_raw_gaze = result["raw_gaze"]
 
             if time.time() < self.recenter_until:
                 return "Recentering", None, []
 
-            self.mouse.move_normalized(
-                result["cursor_norm"],
-                alpha=self.calibration.get("eye_smoothing_alpha"),
-            )
+            if result["move_cursor"]:
+                self.mouse.move_normalized(
+                    result["cursor_norm"],
+                    alpha=self.calibration.get("eye_smoothing_alpha"),
+                )
 
             if result["blink_click"]:
                 self.mouse.left_click()
+            if result["double_click"]:
+                self.mouse.double_click(second_click_only=True)
+            if result["right_click"]:
+                self.mouse.right_click()
+            if result["scroll_amount"] != 0:
+                self.mouse.scroll(result["scroll_amount"])
+            self.mouse.update_drag(result["drag_active"])
 
             h, w = frame.shape[:2]
             cursor_point = (
@@ -160,13 +239,26 @@ class NeuroPointerApp:
                 int(result["cursor_norm"][1] * (h - 1)),
             )
             gesture_label = result["gesture_label"]
+            test_summary = self._record_test_sample(
+                "eye",
+                gesture_label,
+                result["gesture_confidence"],
+                result["diagnostics"],
+            )
             debug_lines.extend(
                 [
                     f"EAR={result['ear']:.3f}  th={self.calibration.get('blink_ear_threshold'):.3f}",
-                    f"gaze_raw=({result['raw_gaze'][0]:.3f}, {result['raw_gaze'][1]:.3f})",
+                    f"L={result['ear_left']:.3f} R={result['ear_right']:.3f} conf={result['gesture_confidence']:.2f}",
+                    f"drag={int(result['drag_active'])} scroll={result['scroll_amount']}",
+                    f"nose=({result['raw_gaze'][0]:.3f}, {result['raw_gaze'][1]:.3f})",
                     f"gaze_center=({self.calibration.get('gaze_center')[0]:.3f}, {self.calibration.get('gaze_center')[1]:.3f})",
+                    f"diag={', '.join(result['diagnostics']) if result['diagnostics'] else 'ok'}",
+                    test_summary if test_summary else "",
                 ]
             )
+        else:
+            self.gaze_tracker.drag_active = False
+            self.mouse.update_drag(False)
 
         return gesture_label, cursor_point, debug_lines
 
@@ -192,6 +284,15 @@ class NeuroPointerApp:
                 self._set_message("Training stopped")
             elif self.calibration.training_active:
                 self._set_message(f"Training started for {self.mode} mode")
+
+        elif key in (ord("p"), ord("P")):
+            self.testing_mode = not self.testing_mode
+            self.testing_stats = {
+                "hand": self._new_test_bucket(),
+                "eye": self._new_test_bucket(),
+            }
+            self.last_test_print = 0.0
+            self._set_message("Testing mode enabled" if self.testing_mode else "Testing mode disabled")
 
         elif key == 32:  # SPACE
             if self.calibration.training_active:

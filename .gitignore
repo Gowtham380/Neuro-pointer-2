@@ -17,4 +17,3 @@ node_modules/
 *.pth
 *.pt
 *.onnx
-.venv/

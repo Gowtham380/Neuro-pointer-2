@@ -17,11 +17,13 @@ class HandGestureRecognizer:
         self.left_click_cooldown = CooldownTimer(config.ACTION_COOLDOWN_SECONDS)
         self.right_click_cooldown = CooldownTimer(config.ACTION_COOLDOWN_SECONDS)
         self.prev_scroll_y = None
+        self.scroll_residual = 0.0
         self.left_click_latched = False
         self.right_click_latched = False
         self.hand_scale_ema = None
         self.prev_keypoints = None
         self.last_print_time = 0.0
+        self.last_left_click_time = 0.0
         self.pose_frames = {
             "left_click": 0,
             "right_click": 0,
@@ -45,6 +47,7 @@ class HandGestureRecognizer:
 
     def reset_tracking(self) -> None:
         self.prev_scroll_y = None
+        self.scroll_residual = 0.0
         self.left_click_latched = False
         self.right_click_latched = False
         self.prev_keypoints = None
@@ -76,10 +79,13 @@ class HandGestureRecognizer:
         return {
             "pinch_click_threshold": max(0.018, pinch_threshold),
             "right_click_threshold": max(0.015, right_threshold),
-            "scroll_separation_threshold": max(right_threshold * 1.55, 0.028),
+            "scroll_separation_threshold": max(right_threshold * 1.70, 0.030),
             "fist_threshold": max(0.080, fist_threshold),
             "volume_pinch_threshold": self.calibration.get("volume_pinch_threshold") * scale_ratio,
-            "scroll_motion_threshold": max(config.SCROLL_DEADZONE, hand_scale * config.HAND_SCROLL_MOTION_RATIO),
+            "scroll_motion_threshold": max(
+                config.SCROLL_DEADZONE,
+                hand_scale * config.HAND_SCROLL_MOTION_RATIO,
+            ),
         }
 
     def _finger_is_extended(self, landmarks, wrist, palm_center, axis, tip_id, pip_id, mcp_id, hand_scale) -> bool:
@@ -98,7 +104,7 @@ class HandGestureRecognizer:
         spread_ok = distance_2d(tip, palm_center) > (distance_2d(pip, palm_center) + spread_margin)
         return projection_ok and spread_ok
 
-    def _finger_states(self, landmarks, hand_label: str, hand_scale: float) -> dict[str, bool]:
+    def _finger_states(self, landmarks, hand_scale: float) -> dict[str, bool]:
         wrist = landmarks[0][:2]
         palm_center = mean_point([landmarks[idx][:2] for idx in (0, 5, 9, 13, 17)])
         forward_axis = self._normalize_axis((landmarks[9][0] - wrist[0], landmarks[9][1] - wrist[1]))
@@ -111,10 +117,6 @@ class HandGestureRecognizer:
             distance_2d(thumb_tip, index_mcp) > (hand_scale * 0.36)
             and distance_2d(thumb_tip, palm_center) > distance_2d(thumb_ip, palm_center)
         )
-
-        # MediaPipe handedness can swap with mirrored cameras, so keep the thumb rule geometric.
-        if hand_label not in {"Left", "Right"}:
-            hand_label = "Right"
 
         return {
             "thumb": thumb_open,
@@ -143,7 +145,7 @@ class HandGestureRecognizer:
             "fist_ratio_norm": self._ratio(fist_ratio, hand_scale),
         }
 
-    def _gesture_scores(self, fingers, metrics, thresholds, poses, scroll_delta) -> dict[str, float]:
+    def _gesture_scores(self, metrics, thresholds, poses, scroll_delta) -> dict[str, float]:
         left_score = 0.0
         if poses["left_click"]:
             left_score = 0.55 + 0.45 * clamp(
@@ -164,7 +166,7 @@ class HandGestureRecognizer:
 
         drag_score = 0.0
         if poses["drag"]:
-            drag_score = 0.55 + 0.45 * clamp(
+            drag_score = 0.60 + 0.40 * clamp(
                 (thresholds["fist_threshold"] - metrics["fist_ratio"])
                 / max(thresholds["fist_threshold"], 1e-6),
                 0.0,
@@ -173,14 +175,18 @@ class HandGestureRecognizer:
 
         scroll_score = 0.0
         if poses["scroll"]:
-            motion_score = clamp(abs(scroll_delta) / max(thresholds["scroll_motion_threshold"], 1e-6), 0.0, 1.0)
+            motion_score = clamp(
+                abs(scroll_delta) / max(thresholds["scroll_motion_threshold"], 1e-6),
+                0.0,
+                1.0,
+            )
             separation_score = clamp(
                 (metrics["index_middle_distance"] - thresholds["scroll_separation_threshold"])
                 / max(thresholds["scroll_separation_threshold"], 1e-6),
                 0.0,
                 1.0,
             )
-            scroll_score = 0.45 + 0.30 * motion_score + 0.25 * separation_score
+            scroll_score = 0.45 + 0.35 * motion_score + 0.20 * separation_score
 
         volume_score = 0.0
         if poses["volume"]:
@@ -191,10 +197,10 @@ class HandGestureRecognizer:
                 1.0,
             )
 
-        move_score = 0.25 + 0.15 * int(fingers["index"])
         return {
-            "Move": move_score,
+            "Move": 0.35,
             "Left Click": left_score,
+            "Double Click": left_score,
             "Right Click": right_score,
             "Scroll": scroll_score,
             "Drag": drag_score,
@@ -204,7 +210,7 @@ class HandGestureRecognizer:
     def _diagnostics(self, metrics, thresholds, poses, keypoints) -> list[str]:
         diagnostics = []
 
-        if thresholds["scroll_separation_threshold"] <= thresholds["right_click_threshold"] * 1.20:
+        if thresholds["scroll_separation_threshold"] <= thresholds["right_click_threshold"] * 1.25:
             diagnostics.append("right/scroll overlap")
 
         if self.prev_keypoints is not None:
@@ -254,7 +260,7 @@ class HandGestureRecognizer:
         hand_scale = self._compute_hand_scale(landmarks)
         thresholds = self._dynamic_thresholds(hand_scale)
         metrics = self._compute_metrics(landmarks, hand_scale)
-        fingers = self._finger_states(landmarks, hand.get("label", "Right"), hand_scale)
+        fingers = self._finger_states(landmarks, hand_scale)
 
         is_pinched = metrics["pinch_distance"] < thresholds["pinch_click_threshold"]
         right_fingers = fingers["index"] and fingers["middle"] and not fingers["ring"] and not fingers["pinky"]
@@ -282,7 +288,7 @@ class HandGestureRecognizer:
             closed_fist
             and not is_pinched
             and metrics["fist_ratio"] < thresholds["fist_threshold"]
-            and metrics["pinch_distance"] > thresholds["pinch_click_threshold"] * 1.15
+            and metrics["pinch_distance"] > thresholds["pinch_click_threshold"] * 1.20
         )
         volume_pose = (
             config.ENABLE_VOLUME_GESTURE
@@ -301,9 +307,16 @@ class HandGestureRecognizer:
         self._update_pose_frame("volume", volume_pose)
 
         left_click = False
+        double_click = False
         left_confirmed = self.pose_frames["left_click"] >= config.CLICK_CONFIRM_FRAMES
         if left_confirmed and not self.left_click_latched and self.left_click_cooldown.ready():
-            left_click = True
+            now = time.perf_counter()
+            if (now - self.last_left_click_time) <= config.DOUBLE_CLICK_WINDOW_SECONDS:
+                double_click = True
+                self.last_left_click_time = 0.0
+            else:
+                left_click = True
+                self.last_left_click_time = now
             self.left_click_latched = True
             self.left_click_cooldown.trigger()
         elif not left_pose:
@@ -329,17 +342,17 @@ class HandGestureRecognizer:
             if self.prev_scroll_y is not None:
                 scroll_delta = self.prev_scroll_y - scroll_anchor_y
                 if scroll_confirmed and abs(scroll_delta) > thresholds["scroll_motion_threshold"]:
-                    speed = clamp(
-                        scroll_delta / max(thresholds["scroll_motion_threshold"], 1e-6),
-                        -3.0,
-                        3.0,
-                    )
-                    scroll_amount = int(
-                        round(speed * self.calibration.get("scroll_sensitivity"))
-                    )
+                    self.scroll_residual += (
+                        scroll_delta / max(thresholds["scroll_motion_threshold"], 1e-6)
+                    ) * self.calibration.get("scroll_sensitivity") * config.HAND_SCROLL_RESIDUAL_DAMPING
+                    emitted = int(clamp(self.scroll_residual, -4.0, 4.0))
+                    if emitted != 0:
+                        scroll_amount = emitted
+                        self.scroll_residual -= emitted
             self.prev_scroll_y = scroll_anchor_y
         else:
             self.prev_scroll_y = None
+            self.scroll_residual = 0.0
 
         volume_level = None
         if volume_active:
@@ -354,14 +367,16 @@ class HandGestureRecognizer:
         }
         keypoints = {idx: landmarks[idx][:2] for idx in (0, 5, 8, 9, 12, 17)}
         diagnostics = self._diagnostics(metrics, thresholds, poses, keypoints)
-        scores = self._gesture_scores(fingers, metrics, thresholds, poses, scroll_delta)
+        scores = self._gesture_scores(metrics, thresholds, poses, scroll_delta)
 
-        if left_click:
+        if drag:
+            gesture_label = "Drag"
+        elif double_click:
+            gesture_label = "Double Click"
+        elif left_click:
             gesture_label = "Left Click"
         elif right_click:
             gesture_label = "Right Click"
-        elif drag:
-            gesture_label = "Drag"
         elif scroll_amount != 0:
             gesture_label = "Scroll Up" if scroll_amount > 0 else "Scroll Down"
         elif volume_active:
@@ -398,6 +413,7 @@ class HandGestureRecognizer:
         return {
             "cursor_norm": cursor_norm,
             "left_click": left_click,
+            "double_click": double_click,
             "right_click": right_click,
             "scroll_amount": scroll_amount,
             "drag": drag,

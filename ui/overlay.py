@@ -172,12 +172,12 @@ class OverlayRenderer:
         # Debug lines
         if config.SHOW_DEBUG and debug_lines:
             y = 250
-            for line in debug_lines[:12]:
+            for line in [line for line in debug_lines if line][:14]:
                 cv2.putText(frame, line, (25, y), self.font, 0.50, (200, 200, 200), 1)
                 y += 22
 
         # Bottom control help
-        controls = "WASD:Move Zone  H:Hand  E:Eye  T:Train  SPACE:Sample  C:Center Eye  R:Reset  Q:Quit"
+        controls = "WASD:Move Zone  H:Hand  E:Eye  T:Train  P:Test  SPACE:Sample  C:Center Eye  R:Reset  Q:Quit"
         text_size = cv2.getTextSize(controls, self.font, 0.50, 1)[0]
         x = max(12, width - text_size[0] - 12)
 

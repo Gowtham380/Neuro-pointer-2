@@ -71,6 +71,13 @@ class MouseController:
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN,0,0)
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP,0,0)
 
+    def double_click(self, second_click_only: bool = False):
+        if second_click_only:
+            self.left_click()
+            return
+        self.left_click()
+        self.left_click()
+
     def right_click(self):
         win32api.mouse_event(win32con.MOUSEEVENTF_RIGHTDOWN,0,0)
         win32api.mouse_event(win32con.MOUSEEVENTF_RIGHTUP,0,0)
