@@ -1,0 +1,28 @@
+{
+  "hand_region": [
+    0.08,
+    0.92,
+    0.12,
+    0.9
+  ],
+  "pinch_click_threshold": 0.055,
+  "right_click_threshold": 0.05,
+  "fist_threshold": 0.205,
+  "scroll_sensitivity": 1.0,
+  "blink_ear_threshold": 0.32,
+  "gaze_center": [
+    0.46230459213256836,
+    0.5685306191444397
+  ],
+  "gaze_sensitivity": [
+    2.4,
+    2.2
+  ],
+  "hand_smoothing_alpha": 0.28,
+  "eye_smoothing_alpha": 0.2,
+  "nose_deadzone": 0.03,
+  "nose_smoothing_alpha": 0.3,
+  "nose_weight": 0.85,
+  "gaze_micro_weight": 0.15,
+  "volume_pinch_threshold": 0.105
+}
